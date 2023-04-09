@@ -1,0 +1,80 @@
+import ccxt
+import talib
+import numpy as np
+import tensorflow as tf
+from sklearn.preprocessing import MinMaxScaler
+
+# set up the exchanges
+binance = ccxt.binance({
+    'apiKey': 'YOUR_API_KEY',
+    'secret': 'YOUR_SECRET_KEY',
+})
+
+bybit = ccxt.bybit({
+    'apiKey': 'YOUR_API_KEY',
+    'secret': 'YOUR_SECRET_KEY',
+})
+
+coinbase = ccxt.coinbasepro({
+    'apiKey': 'YOUR_API_KEY',
+    'secret': 'YOUR_SECRET_KEY',
+})
+
+kraken = ccxt.kraken({
+    'apiKey': 'YOUR_API_KEY',
+    'secret': 'YOUR_SECRET_KEY',
+})
+
+# set up the input parameters
+symbol = 'BTC/USDT'
+timeframe = '1m'
+lookback = 200
+num_features = 8  # open, high, low, close, volume, ema, bb_upper, bb_lower, rsi
+
+# set up the neural network
+model = tf.keras.models.Sequential([
+    tf.keras.layers.Dense(32, activation='relu', input_dim=num_features),
+    tf.keras.layers.Dense(16, activation='relu'),
+    tf.keras.layers.Dense(1, activation='sigmoid')
+])
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+# set up the scaler
+scaler = MinMaxScaler()
+
+# function to get the data from multiple exchanges
+def get_data(exchanges):
+    data = []
+    for exchange in exchanges:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=lookback)
+        volume = exchange.fetch_ohlcv(symbol, timeframe, limit=lookback, params={'type': 'trades'})[:, 5]
+        close = ohlcv[:, 4]
+        ema = talib.EMA(close, timeperiod=89)
+        upper, middle, lower = talib.BBANDS(close, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+        rsi = talib.RSI(close, timeperiod=14)
+        inputs = np.column_stack((ohlcv[:, :5], volume, ema, upper, lower, rsi))
+        inputs = scaler.fit_transform(inputs)
+        data.append(inputs)
+    return np.mean(data, axis=0)
+
+# function to get the target labels
+def get_labels(exchange):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=lookback)
+    close = ohlcv[:, 4]
+    future_price = np.roll(close, -1)
+    labels = np.where(future_price > close, 1, 0)
+    return labels[:-1]
+
+# train the model
+exchanges = [binance, bybit, coinbase, kraken]
+X_train = get_data(exchanges)
+y_train = get_labels(bybit)
+model.fit(X_train, y_train, epochs=10)
+
+# continuously pull data and make predictions
+while True:
+    X_new = get_data(exchanges)[-1]
+    y_pred = model.predict(np.array([X_new]))
+    weight = model.predict_proba(np.array([X_new]))
+    print(f"Prediction: {y_pred}, Weight: {weight}")
+    sleep(2)
